@@ -1,0 +1,24 @@
+[project]
+name = "aegiscore-ai"
+version = "0.1.0"
+description = "A research prototype for uncertainty-aware web application security assessment."
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "fastapi>=0.115,<1.0",
+    "pydantic>=2.10,<3.0",
+    "uvicorn>=0.34,<1.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx2",
+    "pytest>=8.2,<9.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.uv]
+# The repository uses a flat source layout; commands run from the project root.
+package = false

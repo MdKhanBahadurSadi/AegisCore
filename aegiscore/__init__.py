@@ -1,0 +1,2 @@
+"""AEGISCORE deterministic safety contracts."""
+
