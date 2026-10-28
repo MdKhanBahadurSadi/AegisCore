@@ -34,8 +34,15 @@ def test_capabilities_endpoint_reports_only_implemented_and_unimplemented_featur
         "implemented": [
             "api.health_endpoint",
             "api.capabilities_endpoint",
+            "api.approved_evidence_endpoints",
+            "api.persisted_workflow_read_endpoints",
+            "api.dashboard_summary_endpoint",
+            "api.local_authentication",
+            "api.read_permission_authorization",
+            "api.loopback_access_boundary",
             "safety.in_memory_policy_contracts",
             "safety.fake_transport_only_guarded_execution_contract",
+            "backend.persistent_application_storage",
         ],
         "not_implemented": [
             "backend.real_target_transport",
@@ -43,7 +50,6 @@ def test_capabilities_endpoint_reports_only_implemented_and_unimplemented_featur
             "backend.multi_agent_orchestration",
             "backend.vulnerability_assessment_workflow",
             "backend.external_llm_provider",
-            "backend.persistent_application_storage",
         ],
     }
 

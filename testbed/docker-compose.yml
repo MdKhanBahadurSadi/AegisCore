@@ -1,0 +1,49 @@
+# AEGISCORE AI — Phase 8E.2B Offline Benchmark Testbed Configuration
+#
+# CRITICAL SAFETY DIRECTIVES:
+# 1. Strictly isolated internal bridge network: internal: true (zero internet routing).
+# 2. Host ports bound exclusively to loopback 127.0.0.1 (never 0.0.0.0 or LAN interfaces).
+# 3. Automatic restart explicitly disabled (restart: "no").
+# 4. No privileged mode, no host filesystem mounts, no Docker socket mounts.
+# 5. Static engineering specification only: DO NOT execute 'docker compose up' or
+#    pull images until formal supervisor approval is granted.
+
+version: "3.8"
+
+services:
+  juice-shop:
+    image: bkimminich/juice-shop:v15.0.0
+    container_name: aegiscore-testbed-juice-shop
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks:
+      aegiscore-internal-net:
+        ipv4_address: 172.28.0.10
+    environment:
+      - NODE_ENV=unsafe
+
+  dvwa:
+    image: vulnerables/web-dvwa:1.10
+    container_name: aegiscore-testbed-dvwa
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:8080:80"
+    networks:
+      aegiscore-internal-net:
+        ipv4_address: 172.28.0.20
+
+networks:
+  aegiscore-internal-net:
+    name: aegiscore-internal-net
+    driver: bridge
+    internal: true
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.0.0/16
+          gateway: 172.28.0.1

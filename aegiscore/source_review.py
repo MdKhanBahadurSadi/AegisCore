@@ -456,9 +456,61 @@ class PersistentSourceReviewRegistry:
         self._lock = RLock()
         self._initialize_schema()
 
-    def _connect(self) -> sqlite3.Connection:
+    @classmethod
+    def open_existing(
+        cls,
+        database_path: str | os.PathLike[str],
+        *,
+        manifest_path: str | os.PathLike[str],
+        repository_root: str | os.PathLike[str],
+    ) -> PersistentSourceReviewRegistry:
+        """Open an existing persistent review registry without creating or bootstrapping a missing database."""
+        if not isinstance(database_path, (str, os.PathLike)):
+            raise SourceReviewError("database_path must name a persistent SQLite file")
+        raw_database_path = os.fspath(database_path)
+        if not isinstance(raw_database_path, str) or not raw_database_path.strip() or raw_database_path == ":memory:":
+            raise SourceReviewError("database_path must name a persistent SQLite file")
         try:
-            connection = sqlite3.connect(self.database_path, timeout=5.0, isolation_level=None)
+            db = Path(raw_database_path).resolve(strict=False)
+            manifest = Path(manifest_path).resolve(strict=True)
+            root = Path(repository_root).resolve(strict=True)
+        except (OSError, TypeError, ValueError) as exc:
+            raise SourceReviewError("database, manifest, or repository path is invalid") from exc
+
+        if not db.is_file():
+            raise SourceReviewError("Persistent review database file does not exist; opening existing registry requires a valid existing database file")
+        if not manifest.is_file() or not root.is_dir():
+            raise SourceReviewError("manifest file and repository root directory are required")
+
+        instance = cls.__new__(cls)
+        instance.database_path = db
+        instance.manifest_path = manifest
+        instance.repository_root = root
+        instance._lock = RLock()
+        instance._is_read_only = True
+
+        connection = instance._connect(read_only=True)
+        try:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            if version != cls.SCHEMA_VERSION:
+                raise SourceReviewError(f"unsupported or uninitialized review database schema version: {version}")
+            cls._validate_schema(connection)
+        except SourceReviewError:
+            raise
+        except sqlite3.Error as exc:
+            raise SourceReviewError("review database schema is malformed or unavailable") from exc
+        finally:
+            connection.close()
+
+        return instance
+
+    def _connect(self, *, read_only: bool = False) -> sqlite3.Connection:
+        try:
+            if read_only:
+                db_uri = f"file:{self.database_path.as_posix()}?mode=ro"
+                connection = sqlite3.connect(db_uri, uri=True, timeout=5.0, isolation_level=None)
+            else:
+                connection = sqlite3.connect(self.database_path, timeout=5.0, isolation_level=None)
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA busy_timeout = 5000")
@@ -468,7 +520,7 @@ class PersistentSourceReviewRegistry:
 
     @contextmanager
     def _connection(self):
-        connection = self._connect()
+        connection = self._connect(read_only=getattr(self, "_is_read_only", False))
         try:
             yield connection
         finally:
@@ -1102,6 +1154,176 @@ class PersistentSourceReviewRegistry:
             self._mirror_record(entry, record)
             self._sync_approval_status(manifest, entries)
             return record, True
+
+        return self._transaction(mutate)
+
+    def apply_review_workflow(
+        self,
+        ingestion: IngestionResult,
+        content_sha256: str,
+        submission: ReviewSubmission,
+        decision: ReviewDecision,
+    ) -> SourceReviewRecord:
+        """Atomically register, submit, and decide a source revision in a single transaction."""
+        if not isinstance(ingestion, IngestionResult):
+            raise SourceReviewError("ingestion must be IngestionResult")
+        content_sha256 = _required_text(content_sha256, "content_sha256")
+        if not isinstance(submission, ReviewSubmission):
+            raise SourceReviewError("submission must be ReviewSubmission")
+        if not isinstance(decision, ReviewDecision):
+            raise SourceReviewError("decision must be ReviewDecision")
+
+        def mutate(connection, manifest, entries):
+            self._assert_approval_status(manifest, entries)
+            incoming = ingestion.source.metadata
+            if incoming.review_state is not SourceReviewState.CANDIDATE:
+                raise SourceReviewError("only candidate source revisions may be registered")
+            entry = entries.get(incoming.source_id)
+            if entry is None:
+                raise SourceReviewConsistencyError("source is not present in the approved manifest catalog")
+            canonical = self._manifest_ingestion(entry)
+            if canonical.source.metadata != incoming:
+                raise SourceReviewConsistencyError("registration does not match the current manifest source bytes/metadata")
+            if not self._metadata_matches_manifest(incoming, entry):
+                raise SourceReviewConsistencyError("registration metadata differs from the manifest")
+            current = self._current_record(connection, incoming.source_id)
+            manifest_revision_sha256 = self._manifest_revision_sha256(entry)
+            if current is not None:
+                if (
+                    replace(current.metadata, review_state=SourceReviewState.CANDIDATE) == incoming
+                    and current.manifest_revision_sha256 == manifest_revision_sha256
+                ):
+                    pass
+                else:
+                    if entry.get("review_state") != SourceReviewState.CANDIDATE.value or entry.get("review_events") != []:
+                        raise SourceReviewConsistencyError(
+                            "changed content requires a candidate manifest revision with an empty review history"
+                        )
+                    superseded_event = ReviewEvent(
+                        action="superseded",
+                        occurred_at=submission.submitted_at,
+                        rationale="A new source content or provenance revision was registered.",
+                    )
+                    stale = replace(current.metadata, review_state=SourceReviewState.STALE)
+                    connection.execute(
+                        "UPDATE source_revisions SET state = ?, metadata_json = ?, is_current = 0 "
+                        "WHERE source_id = ? AND revision = ? AND is_current = 1",
+                        (SourceReviewState.STALE.value, self._metadata_json(stale), incoming.source_id, current.revision),
+                    )
+                    self._insert_event(connection, incoming.source_id, current.revision, superseded_event, SourceReviewState.STALE)
+                    revision = current.revision + 1
+                    previous_revision = current.revision
+                    registered_event = ReviewEvent(
+                        action="registered",
+                        occurred_at=submission.submitted_at,
+                        rationale="Source revision registered as a candidate; no approval is implied.",
+                        actor_ref=submission.submitter_ref,
+                    )
+                    connection.execute(
+                        "INSERT INTO source_revisions(source_id,revision,content_sha256,manifest_revision_sha256,metadata_json,state,is_current,previous_revision) "
+                        "VALUES(?,?,?,?,?,?,?,?)",
+                        (
+                            incoming.source_id,
+                            revision,
+                            incoming.content_sha256,
+                            manifest_revision_sha256,
+                            self._metadata_json(incoming),
+                            SourceReviewState.CANDIDATE.value,
+                            1,
+                            previous_revision,
+                        ),
+                    )
+                    self._insert_event(connection, incoming.source_id, revision, registered_event, SourceReviewState.CANDIDATE)
+            else:
+                if entry.get("review_state") != SourceReviewState.CANDIDATE.value or entry.get("review_events") != []:
+                    raise SourceReviewConsistencyError("manifest claims a review state without a persistent event history")
+                revision = 1
+                previous_revision = None
+                registered_event = ReviewEvent(
+                    action="registered",
+                    occurred_at=submission.submitted_at,
+                    rationale="Source revision registered as a candidate; no approval is implied.",
+                    actor_ref=submission.submitter_ref,
+                )
+                connection.execute(
+                    "INSERT INTO source_revisions(source_id,revision,content_sha256,manifest_revision_sha256,metadata_json,state,is_current,previous_revision) "
+                    "VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        incoming.source_id,
+                        revision,
+                        incoming.content_sha256,
+                        manifest_revision_sha256,
+                        self._metadata_json(incoming),
+                        SourceReviewState.CANDIDATE.value,
+                        1,
+                        previous_revision,
+                    ),
+                )
+                self._insert_event(connection, incoming.source_id, revision, registered_event, SourceReviewState.CANDIDATE)
+
+            current = self._current_record(connection, incoming.source_id)
+            self._mirror_record(entry, current)
+            self._assert_mirror(entry, current)
+            if current.metadata.content_sha256 != content_sha256:
+                raise SourceReviewError("source revision is stale or does not match current manifest bytes")
+
+            # Submit for review
+            if current.metadata.review_state is SourceReviewState.CANDIDATE:
+                sub_event = ReviewEvent(
+                    action="submitted",
+                    occurred_at=_timestamp(submission.submitted_at, "submitted_at"),
+                    actor_ref=_required_text(submission.submitter_ref, "submitter_ref"),
+                    rationale=_required_text(submission.rationale, "rationale"),
+                )
+                state = SourceReviewState.PENDING_REVIEW
+                metadata = replace(current.metadata, review_state=state)
+                connection.execute(
+                    "UPDATE source_revisions SET state = ?, metadata_json = ? WHERE source_id = ? AND revision = ?",
+                    (state.value, self._metadata_json(metadata), incoming.source_id, current.revision),
+                )
+                self._insert_event(connection, incoming.source_id, current.revision, sub_event, state)
+                current = SourceReviewRecord(
+                    metadata, current.revision, True, current.events + (sub_event,), current.manifest_revision_sha256
+                )
+                self._mirror_record(entry, current)
+
+            # Decide
+            if current.metadata.review_state is not SourceReviewState.PENDING_REVIEW:
+                raise SourceReviewError("only a pending revision may be decided")
+            if decision.decision == "approve":
+                if not (current.metadata.title and current.metadata.publisher):
+                    raise SourceReviewError("approval requires supplied title and publisher attribution")
+                if not (current.metadata.local_path or current.metadata.canonical_reference):
+                    raise SourceReviewError("approval requires a source locator")
+                if not decision.checklist.all_checks_pass:
+                    raise SourceReviewError("approval requires every review checklist item to pass")
+                state = SourceReviewState.APPROVED
+            else:
+                state = SourceReviewState.REJECTED
+
+            dec_event = ReviewEvent(
+                action="approved" if state is SourceReviewState.APPROVED else "rejected",
+                occurred_at=_timestamp(decision.reviewed_at, "reviewed_at"),
+                actor_ref=_required_text(decision.reviewer_ref, "reviewer_ref"),
+                rationale=_required_text(decision.rationale, "rationale"),
+                checklist=decision.checklist,
+                intended_use=_required_text(decision.intended_use, "intended_use"),
+                limitations=_required_text(decision.limitations, "limitations"),
+                corroboration_notes=_required_text(decision.corroboration_notes, "corroboration_notes"),
+                unknown_metadata_notes=_required_text(decision.unknown_metadata_notes, "unknown_metadata_notes"),
+            )
+            metadata = replace(current.metadata, review_state=state)
+            connection.execute(
+                "UPDATE source_revisions SET state = ?, metadata_json = ? WHERE source_id = ? AND revision = ?",
+                (state.value, self._metadata_json(metadata), incoming.source_id, current.revision),
+            )
+            self._insert_event(connection, incoming.source_id, current.revision, dec_event, state)
+            final_record = SourceReviewRecord(
+                metadata, current.revision, True, current.events + (dec_event,), current.manifest_revision_sha256
+            )
+            self._mirror_record(entry, final_record)
+            self._sync_approval_status(manifest, entries)
+            return final_record, True
 
         return self._transaction(mutate)
 
