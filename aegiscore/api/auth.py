@@ -22,8 +22,8 @@ from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 
-KNOWN_PERMISSIONS = frozenset({"records:read", "evidence:read"})
-DEFAULT_PERMISSIONS = frozenset({"records:read", "evidence:read"})
+KNOWN_PERMISSIONS = frozenset({"records:read", "evidence:read", "assessments:create", "assessments:execute"})
+DEFAULT_PERMISSIONS = frozenset({"records:read", "evidence:read", "assessments:create", "assessments:execute"})
 DEFAULT_SESSION_TTL_SECONDS = 1800
 _TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{40,64}$")
 _bearer = HTTPBearer(auto_error=False)
@@ -95,9 +95,20 @@ class AuthSettings:
             return cls(env_username, env_hash, ttl, permissions)
 
         configured_path = os.environ.get("AEGISCORE_AUTH_CONFIG_FILE")
-        path = Path(configured_path).expanduser() if configured_path else default_auth_config_path()
-        if not path.is_file():
-            return None
+        if configured_path is not None:
+            if not configured_path.strip():
+                raise AuthConfigurationError("AEGISCORE_AUTH_CONFIG_FILE must name a private auth TOML file.")
+            try:
+                path = Path(configured_path).expanduser()
+                configured_file_exists = path.is_file()
+            except (OSError, TypeError, ValueError):
+                raise AuthConfigurationError("Configured authentication file is unavailable.") from None
+            if not configured_file_exists:
+                raise AuthConfigurationError("Configured authentication file is unavailable.")
+        else:
+            path = default_auth_config_path()
+            if not path.is_file():
+                return None
         try:
             if os.name != "nt" and path.stat().st_mode & 0o077:
                 raise AuthConfigurationError(

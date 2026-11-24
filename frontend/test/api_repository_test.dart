@@ -11,6 +11,7 @@ import 'package:aegiscore_ui/services/aegiscore_repository.dart';
 import 'package:aegiscore_ui/services/api_aegiscore_repository.dart';
 import 'package:aegiscore_ui/services/backend_contract_models.dart';
 import 'package:aegiscore_ui/services/backend_errors.dart';
+import 'package:aegiscore_ui/services/backend_assessment_models.dart';
 import 'package:aegiscore_ui/services/providers.dart';
 import 'package:aegiscore_ui/features/assessment_setup/models/assessment_setup_model.dart';
 import 'package:aegiscore_ui/features/evidence/models/evidence_model.dart';
@@ -53,51 +54,57 @@ void main() {
       client.close();
     });
 
-    test('sends its bearer token and notifies auth when the session expires', () async {
-      const token = 'signed-in-test-session-token';
-      String? requestAuthorization;
-      String? expiredToken;
-      final client = MockClient((request) async {
-        requestAuthorization = request.headers['Authorization'];
-        return http.Response('{"detail":"generic"}', 401);
-      });
-      final repository = ApiAegisCoreRepository(
-        configuration: _configuration(),
-        client: client,
-        accessToken: token,
-        onAuthenticationExpired: (value) => expiredToken = value,
-      );
+    test(
+      'sends its bearer token and notifies auth when the session expires',
+      () async {
+        const token = 'signed-in-test-session-token';
+        String? requestAuthorization;
+        String? expiredToken;
+        final client = MockClient((request) async {
+          requestAuthorization = request.headers['Authorization'];
+          return http.Response('{"detail":"generic"}', 401);
+        });
+        final repository = ApiAegisCoreRepository(
+          configuration: _configuration(),
+          client: client,
+          accessToken: token,
+          onAuthenticationExpired: (value) => expiredToken = value,
+        );
 
-      await expectLater(
-        repository.getFindings(),
-        throwsA(isA<BackendAuthenticationException>()),
-      );
+        await expectLater(
+          repository.getFindings(),
+          throwsA(isA<BackendAuthenticationException>()),
+        );
 
-      expect(requestAuthorization, 'Bearer $token');
-      expect(expiredToken, token);
-      client.close();
-    });
+        expect(requestAuthorization, 'Bearer $token');
+        expect(expiredToken, token);
+        client.close();
+      },
+    );
 
-    test('reports a permission denial without treating it as session expiry', () async {
-      const token = 'signed-in-test-session-token';
-      var expired = false;
-      final client = MockClient(
-        (_) async => http.Response('{"detail":"private"}', 403),
-      );
-      final repository = ApiAegisCoreRepository(
-        configuration: _configuration(),
-        client: client,
-        accessToken: token,
-        onAuthenticationExpired: (_) => expired = true,
-      );
+    test(
+      'reports a permission denial without treating it as session expiry',
+      () async {
+        const token = 'signed-in-test-session-token';
+        var expired = false;
+        final client = MockClient(
+          (_) async => http.Response('{"detail":"private"}', 403),
+        );
+        final repository = ApiAegisCoreRepository(
+          configuration: _configuration(),
+          client: client,
+          accessToken: token,
+          onAuthenticationExpired: (_) => expired = true,
+        );
 
-      await expectLater(
-        repository.getEvidenceList(),
-        throwsA(isA<BackendAuthorizationException>()),
-      );
-      expect(expired, isFalse);
-      client.close();
-    });
+        await expectLater(
+          repository.getEvidenceList(),
+          throwsA(isA<BackendAuthorizationException>()),
+        );
+        expect(expired, isFalse);
+        client.close();
+      },
+    );
 
     test(
       'loads persisted summary, storage state, findings and synthetic reports',
@@ -636,14 +643,250 @@ void main() {
           repository.submitAssessmentSetup(
             const AssessmentSetupConfig(
               labTargetId: 'juice_shop_local',
-              targetUrl: 'http://localhost:3000',
-              selectedSpecialists: ['sql_injection_analyst'],
+              targetUrl: 'http://127.0.0.1:3000',
               isAuthorizedLabConfirmed: true,
             ),
           ),
           throwsA(isA<UnsupportedBackendCapabilityException>()),
         );
         client.close();
+      },
+    );
+
+    test(
+      'creates an assessment with only the supported target_url field',
+      () async {
+        http.Request? captured;
+        final client = MockClient((request) async {
+          captured = request;
+          return http.Response(jsonEncode(_assessmentResponse()), 201);
+        });
+        final repository = ApiAegisCoreRepository(
+          configuration: _configuration(),
+          client: client,
+          accessToken: 'session-token',
+        );
+
+        final assessment = await repository.createAssessment(
+          'http://127.0.0.1:3000',
+        );
+
+        expect(captured!.method, 'POST');
+        expect(captured!.url.path, '/assessments');
+        expect(captured!.headers['Authorization'], 'Bearer session-token');
+        expect(jsonDecode(captured!.body), {
+          'target_url': 'http://127.0.0.1:3000',
+        });
+        expect(assessment.assessmentId, _assessmentId);
+        expect(assessment.status, BackendAssessmentStatus.created);
+        client.close();
+      },
+    );
+
+    test('parses bounded persisted assessment history', () async {
+      http.Request? captured;
+      final client = MockClient((request) async {
+        captured = request;
+        return http.Response(
+          jsonEncode({
+            'items': [_assessmentResponse()],
+            'total': 1,
+            'offset': 0,
+            'limit': 50,
+          }),
+          200,
+        );
+      });
+      final repository = ApiAegisCoreRepository(
+        configuration: _configuration(),
+        client: client,
+      );
+
+      final page = await repository.getAssessments();
+
+      expect(captured!.method, 'GET');
+      expect(captured!.url.path, '/assessments');
+      expect(captured!.url.queryParameters, {'offset': '0', 'limit': '50'});
+      expect(page.total, 1);
+      expect(page.items.single.assessmentId, _assessmentId);
+      client.close();
+    });
+
+    test('executes through the existing bodyless POST contract', () async {
+      http.Request? captured;
+      final client = MockClient((request) async {
+        captured = request;
+        return http.Response(
+          jsonEncode(
+            _assessmentResponse(
+              status: 'completed',
+              executionResult: {
+                'reachable': true,
+                'outcome': 'Passive HEAD completed.',
+                'ai_review': _reviewResponse(status: 'disabled', reviews: []),
+              },
+            ),
+          ),
+          200,
+        );
+      });
+      final repository = ApiAegisCoreRepository(
+        configuration: _configuration(),
+        client: client,
+      );
+
+      final assessment = await repository.executeAssessment(_assessmentId);
+
+      expect(captured!.method, 'POST');
+      expect(captured!.url.path, '/assessments/$_assessmentId/execute');
+      expect(captured!.body, isEmpty);
+      expect(assessment.status, BackendAssessmentStatus.completed);
+      expect(assessment.advisory.status, BackendAdvisoryStatus.disabled);
+      client.close();
+    });
+
+    test(
+      'loads persisted assessment, deterministic findings and evidence',
+      () async {
+        final requestPaths = <String>[];
+        final client = MockClient((request) async {
+          requestPaths.add(request.url.path);
+          if (request.url.path == '/assessments/$_assessmentId') {
+            return http.Response(
+              jsonEncode(
+                _assessmentResponse(
+                  status: 'completed',
+                  executionResult: {
+                    'ai_review': _reviewResponse(status: 'reviewed'),
+                  },
+                ),
+              ),
+              200,
+            );
+          }
+          if (request.url.path.endsWith('/findings')) {
+            return http.Response(
+              jsonEncode({
+                'items': [_findingJson()],
+                'total': 1,
+              }),
+              200,
+            );
+          }
+          if (request.url.path.endsWith('/evidence')) {
+            return http.Response(
+              jsonEncode({
+                'items': [_evidenceJson()],
+                'total': 1,
+              }),
+              200,
+            );
+          }
+          return http.Response('', 404);
+        });
+        final repository = ApiAegisCoreRepository(
+          configuration: _configuration(),
+          client: client,
+        );
+
+        final details = await repository.getAssessmentDetails(_assessmentId);
+
+        expect(details, isNotNull);
+        expect(details!.assessment.status, BackendAssessmentStatus.completed);
+        expect(details.findings!.single.severity, 'medium');
+        expect(
+          details.findings!.single.title,
+          'Strict transport policy missing',
+        );
+        expect(details.evidence!.single.evidenceId, _evidenceId);
+        expect(details.advisory.status, BackendAdvisoryStatus.reviewed);
+        expect(requestPaths, contains('/assessments/$_assessmentId/findings'));
+        expect(requestPaths, contains('/assessments/$_assessmentId/evidence'));
+        client.close();
+      },
+    );
+
+    test(
+      'rejects invalid advisory references while preserving findings',
+      () async {
+        final wrongFinding = 'fnd_${List.filled(32, 'd').join()}';
+        final client = MockClient((request) async {
+          if (request.url.path == '/assessments/$_assessmentId') {
+            return http.Response(
+              jsonEncode(
+                _assessmentResponse(
+                  status: 'completed',
+                  executionResult: {
+                    'ai_review': _reviewResponse(findingId: wrongFinding),
+                  },
+                ),
+              ),
+              200,
+            );
+          }
+          if (request.url.path.endsWith('/findings')) {
+            return http.Response(
+              jsonEncode({
+                'items': [_findingJson()],
+                'total': 1,
+              }),
+              200,
+            );
+          }
+          if (request.url.path.endsWith('/evidence')) {
+            return http.Response(
+              jsonEncode({
+                'items': [_evidenceJson()],
+                'total': 1,
+              }),
+              200,
+            );
+          }
+          return http.Response('', 404);
+        });
+        final repository = ApiAegisCoreRepository(
+          configuration: _configuration(),
+          client: client,
+        );
+
+        final details = await repository.getAssessmentDetails(_assessmentId);
+
+        expect(details!.findings, hasLength(1));
+        expect(details.advisory.status, BackendAdvisoryStatus.invalid);
+        expect(details.advisory.reviews, isEmpty);
+        client.close();
+      },
+    );
+
+    test(
+      'malformed and oversized advisory text is rejected without parsing HTML',
+      () {
+        final tooLong = _reviewResponse();
+        (tooLong['reviews'] as List).first['recommendation'] = List.filled(
+          601,
+          'x',
+        ).join();
+        expect(
+          BackendAdvisoryReview.fromJson(tooLong).status,
+          BackendAdvisoryStatus.invalid,
+        );
+
+        final oversized = _reviewResponse();
+        oversized['untrusted'] = List.filled(17000, 'x').join();
+        expect(
+          BackendAdvisoryReview.fromJson(oversized).status,
+          BackendAdvisoryStatus.invalid,
+        );
+
+        final htmlText = _reviewResponse();
+        (htmlText['reviews'] as List).first['recommendation'] =
+            '<script>alert(1)</script>';
+        final parsed = BackendAdvisoryReview.fromJson(htmlText);
+        expect(parsed.status, BackendAdvisoryStatus.reviewed);
+        expect(
+          parsed.reviews.single.recommendation,
+          '<script>alert(1)</script>',
+        );
       },
     );
   });
@@ -735,6 +978,87 @@ Map<String, Object?> _approvedEvidenceItem({required String id}) => {
     'citation_source_id': 'source-1',
     'citation_chunk_id': id,
   },
+};
+
+final String _assessmentId = 'asm_${List.filled(32, 'a').join()}';
+final String _findingId = 'fnd_${List.filled(32, 'b').join()}';
+final String _evidenceId = 'evi_${List.filled(32, 'c').join()}';
+
+Map<String, Object?> _assessmentResponse({
+  String status = 'created',
+  Map<String, Object?>? executionResult,
+}) => {
+  'assessment_id': _assessmentId,
+  'target_id': 'local-test-target',
+  'target_url': 'http://127.0.0.1:3000',
+  'authorization_ref': 'opaque-server-reference',
+  'canonical_endpoint': 'http://127.0.0.1:3000/',
+  'status': status,
+  'created_at': '2026-11-24T10:00:00Z',
+  'updated_at': '2026-11-24T10:00:01Z',
+  'execution_result': executionResult,
+};
+
+Map<String, Object?> _findingJson() => {
+  'finding_id': _findingId,
+  'assessment_id': _assessmentId,
+  'rule_id': 'strict_transport_security_missing',
+  'title': 'Strict transport policy missing',
+  'description':
+      'The observed response did not include a transport policy header.',
+  'classification': 'configuration_observation',
+  'severity': 'medium',
+  'confidence': 'high',
+  'status': 'detected',
+  'evidence_ids': [_evidenceId],
+  'remediation':
+      'Configure the expected transport policy for this local service.',
+  'created_at': '2026-11-24T10:00:01Z',
+};
+
+Map<String, Object?> _evidenceJson() => {
+  'evidence_id': _evidenceId,
+  'assessment_id': _assessmentId,
+  'evidence_type': 'http_security_headers',
+  'source': 'passive_head_observation',
+  'observed_at': '2026-11-24T10:00:00Z',
+  'http_method': 'HEAD',
+  'http_status': 200,
+  'normalized_headers': <String, String>{},
+  'header_flags': <String, String>{},
+  'collection_status': 'observed',
+  'provenance': <String, Object?>{'duration_ms': 4},
+};
+
+Map<String, Object?> _reviewResponse({
+  String status = 'reviewed',
+  String findingId = 'fnd_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+  String evidenceId = 'evi_cccccccccccccccccccccccccccccccc',
+  List<Map<String, Object?>>? reviews,
+}) => {
+  'status': status,
+  'analysis_type': 'advisory_inference',
+  'model_id': 'deterministic-test-adapter',
+  'provider_mode': 'deterministic_fake',
+  'execution_duration_ms': 2.5,
+  'confidence_calibrated': false,
+  'factual_support': 'not_evaluated',
+  'abstention_reason': null,
+  'reviews':
+      reviews ??
+      (status == 'reviewed'
+          ? [
+              {
+                'finding_id': findingId,
+                'evidence_ids': [evidenceId],
+                'inferred_risk':
+                    'This observation could indicate a policy gap.',
+                'uncertainty':
+                    'A HEAD observation does not prove exploitability.',
+                'recommendation': 'Review the endpoint policy configuration.',
+              },
+            ]
+          : []),
 };
 
 String _digest(String character) => List.filled(64, character).join();

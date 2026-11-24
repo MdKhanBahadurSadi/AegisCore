@@ -5,6 +5,8 @@ bool isAuthorizedLocalLabTarget(String targetUrl) {
   if (uri == null || uri.scheme != 'http' || uri.userInfo.isNotEmpty) {
     return false;
   }
-  final isLocal = uri.host == 'localhost' || uri.host == '127.0.0.1';
+  // The backend binds authorization to a numeric loopback literal; DNS names
+  // such as localhost are deliberately not accepted for target execution.
+  final isLocal = uri.host == '127.0.0.1';
   return isLocal && (uri.port == 3000 || uri.port == 8080);
 }

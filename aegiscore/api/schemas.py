@@ -14,6 +14,8 @@ CapabilityId = Literal[
     "api.approved_evidence_endpoints",
     "api.persisted_workflow_read_endpoints",
     "api.dashboard_summary_endpoint",
+    "api.assessment_creation_endpoint",
+    "api.assessment_execution_endpoint",
     "api.local_authentication",
     "api.read_permission_authorization",
     "api.loopback_access_boundary",
@@ -34,6 +36,87 @@ class HealthResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: Literal["ok"] = "ok"
+
+
+class AssessmentCreateRequest(BaseModel):
+    """Request model for creating a new target security assessment record."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+
+    target_url: str = Field(min_length=1, max_length=2048)
+
+
+class AssessmentResponse(BaseModel):
+    """Response model representing a created assessment record."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    assessment_id: str = Field(pattern=r"^asm_[0-9a-f]{32}$")
+    target_url: str
+    target_id: str | None = None
+    canonical_endpoint: str | None = None
+    authorization_ref: str | None = None
+    registration_version: str | None = None
+    authorization_provenance: dict[str, Any] | None = None
+    status: Literal["created", "pending", "running", "completed", "failed"] = "created"
+    created_at: str
+    updated_at: str | None = None
+    execution_result: dict[str, Any] | None = None
+
+
+class AssessmentEvidenceResponse(BaseModel):
+    """Normalized evidence record collected during assessment execution."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    evidence_id: str = Field(pattern=r"^evi_[0-9a-f]{32}$")
+    assessment_id: str = Field(pattern=r"^asm_[0-9a-f]{32}$")
+    evidence_type: str = "http_security_headers"
+    source: str = "passive_head_observation"
+    observed_at: str
+    http_method: str = "HEAD"
+    http_status: int | None = None
+    normalized_headers: dict[str, str] = Field(default_factory=dict)
+    header_flags: dict[str, str] = Field(default_factory=dict)
+    collection_status: Literal["observed", "failed", "unreachable"] = "observed"
+    provenance: dict[str, Any] = Field(default_factory=dict)
+
+
+class AssessmentEvidenceListResponse(BaseModel):
+    """Paginated or complete list of evidence items for an assessment."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    items: tuple[AssessmentEvidenceResponse, ...]
+    total: int = Field(ge=0)
+
+
+class AssessmentFindingItemResponse(BaseModel):
+    """Structured security configuration finding emitted by the rule detector."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    finding_id: str = Field(pattern=r"^fnd_[0-9a-f]{32}$")
+    assessment_id: str = Field(pattern=r"^asm_[0-9a-f]{32}$")
+    rule_id: str
+    title: str
+    description: str
+    classification: Literal["configuration_observation"] = "configuration_observation"
+    severity: Literal["info", "low", "medium", "high", "critical"] = "info"
+    confidence: Literal["low", "medium", "high"] = "low"
+    status: Literal["detected"] = "detected"
+    evidence_ids: tuple[str, ...] = Field(default_factory=tuple)
+    remediation: str
+    created_at: str
+
+
+class AssessmentFindingListResponse(BaseModel):
+    """Paginated or complete list of findings for an assessment."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    items: tuple[AssessmentFindingItemResponse, ...]
+    total: int = Field(ge=0)
 
 
 class AuthLoginRequest(BaseModel):
@@ -58,7 +141,7 @@ class AuthSessionResponse(BaseModel):
 
     authenticated: Literal[True] = True
     username: str
-    permissions: tuple[Literal["records:read", "evidence:read"], ...]
+    permissions: tuple[Literal["records:read", "evidence:read", "assessments:create", "assessments:execute"], ...]
     expires_in: int = Field(ge=0, le=86400)
 
 
@@ -81,6 +164,8 @@ class CapabilitiesResponse(BaseModel):
         "api.approved_evidence_endpoints",
         "api.persisted_workflow_read_endpoints",
         "api.dashboard_summary_endpoint",
+        "api.assessment_creation_endpoint",
+        "api.assessment_execution_endpoint",
         "api.local_authentication",
         "api.read_permission_authorization",
         "api.loopback_access_boundary",
@@ -182,6 +267,10 @@ class PageResponse(BaseModel):
     total: int = Field(ge=0)
     offset: int = Field(ge=0)
     limit: int = Field(ge=1, le=100)
+
+
+class AssessmentListResponse(PageResponse):
+    items: tuple[AssessmentResponse, ...]
 
 
 class OfflineSessionResponse(BaseModel):

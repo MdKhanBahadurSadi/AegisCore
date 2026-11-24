@@ -1,6 +1,6 @@
-"""Read-only system and approved-evidence routes."""
-
+import hashlib
 import sqlite3
+from datetime import datetime, timezone
 from typing import Annotated
 from urllib.parse import urlsplit, urlunsplit
 
@@ -14,20 +14,37 @@ from aegiscore.api.auth import (
     require_permission,
     require_session,
 )
-from aegiscore.local_persistence import LocalRecordStore, LocalStoreError
+from aegiscore.authorization_verification import (
+    AuthorizationFailureReason,
+    AuthorizationVerificationError,
+    verify_authorization,
+)
+from aegiscore.execution import (
+    DEFAULT_EXECUTION_LEASE_SECONDS,
+)
+from aegiscore.local_persistence import LocalRecordStore, LocalStoreConflictError, LocalStoreError
+from aegiscore.passive_detector import PassiveHeaderDetector
+from aegiscore.target_authorization import TargetAuthorizationError, resolve_authorized_endpoint
 from aegiscore.api.schemas import (
+    ApprovedEvidenceListResponse,
+    ApprovedEvidenceResponse,
+    AssessmentCreateRequest,
+    AssessmentEvidenceListResponse,
+    AssessmentEvidenceResponse,
+    AssessmentFindingItemResponse,
+    AssessmentFindingListResponse,
+    AssessmentListResponse,
+    AssessmentResponse,
     AuthLoginRequest,
     AuthLoginResponse,
     AuthLogoutResponse,
     AuthSessionResponse,
-    ApprovedEvidenceListResponse,
-    ApprovedEvidenceResponse,
     CapabilitiesResponse,
     DashboardSummaryResponse,
-    EvidenceChunkResponse,
-    EvidenceSourceResponse,
     EvaluationReportListResponse,
     EvaluationReportResponse,
+    EvidenceChunkResponse,
+    EvidenceSourceResponse,
     FindingListResponse,
     FindingResponse,
     HealthResponse,
@@ -103,11 +120,35 @@ def _local_store(request: Request) -> LocalRecordStore:
         ) from None
 
 
+def _writable_local_store(request: Request) -> LocalRecordStore:
+    configured_path = getattr(request.app.state, "local_store_path", None)
+    if configured_path is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Local persistence store is not configured or is unavailable.",
+        )
+    try:
+        return LocalRecordStore.create_or_open(configured_path)
+    except LocalStoreError:
+        raise HTTPException(
+            status_code=503,
+            detail="Local persistence store is not configured or is unavailable.",
+        ) from None
+
+
 def _store_failure() -> HTTPException:
     return HTTPException(
         status_code=503,
         detail="Local persistence store is unavailable or inconsistent.",
     )
+
+
+def _authorization_failure(exc: AuthorizationVerificationError, *, creating: bool = False) -> HTTPException:
+    if exc.reason is AuthorizationFailureReason.UNAVAILABLE:
+        return HTTPException(status_code=503, detail="Authorization verification is unavailable.")
+    if creating:
+        return HTTPException(status_code=403, detail="Target authorization could not be verified.")
+    return HTTPException(status_code=409, detail="Target authorization is invalid, expired, or revoked.")
 
 
 @router.get("/health", response_model=HealthResponse, tags=["system"])
@@ -561,3 +602,349 @@ def get_approved_evidence(
         if item.chunk.evidence_id == evidence_id:
             return item
     raise HTTPException(status_code=404, detail="Approved evidence was not found.")
+
+
+@router.post(
+    "/assessments",
+    response_model=AssessmentResponse,
+    status_code=201,
+    tags=["assessments"],
+    dependencies=[Depends(require_permission("assessments:create"))],
+    responses={
+        201: {"description": "Assessment successfully created and persisted."},
+        400: {"description": "Target URL violates lab scope, scheme, credentials, or port rules."},
+        401: {"description": "Authentication required or credentials are invalid."},
+        403: {"description": "Authenticated account lacks 'assessments:create' permission."},
+        422: {"description": "Request payload validation error."},
+        503: {"description": "Authentication or local persistence store is not configured or unavailable."},
+    },
+)
+def create_assessment(
+    request: Request,
+    payload: AssessmentCreateRequest,
+    session: Annotated[AuthenticatedSession, Depends(require_session)],
+) -> AssessmentResponse:
+    """Validate target URL scope and persist a new target assessment record.
+
+    Authentication:
+        Bearer token required (Authorization: Bearer <token>).
+
+    Required Permission:
+        'assessments:create' (Read-only 'records:read' permission is insufficient).
+
+    Responses:
+        201: Assessment successfully created and persisted.
+        400: Target URL violates lab scope, scheme, credentials, or port rules.
+        401: Unauthenticated request or invalid credentials.
+        403: Authenticated account lacks 'assessments:create' permission.
+        422: Request payload validation error.
+        503: Authentication or local persistence store is not configured or unavailable.
+    """
+
+    registry = getattr(request.app.state, "authorized_target_registry", None)
+    verifier = getattr(request.app.state, "authorization_verifier", None)
+    if registry is None or verifier is None:
+        raise HTTPException(status_code=503, detail="Authorization verification is unavailable.")
+    try:
+        registration, canonical_endpoint = resolve_authorized_endpoint(registry, payload.target_url)
+    except TargetAuthorizationError:
+        raise HTTPException(status_code=400, detail="Target endpoint is not authorized.") from None
+    try:
+        authorization_evidence = verify_authorization(verifier, registration, canonical_endpoint)
+    except AuthorizationVerificationError as exc:
+        raise _authorization_failure(exc, creating=True) from None
+
+    store = _writable_local_store(request)
+    try:
+        record = store.create_assessment(
+            target_url=canonical_endpoint,
+            target_id=registration.target_id,
+            canonical_endpoint=canonical_endpoint,
+            authorization_ref=registration.authorization_ref,
+            registration_version=registration.registration_version,
+            authorization_provenance=authorization_evidence.to_record(),
+        )
+        return AssessmentResponse(**record)
+    except LocalStoreError:
+        raise _store_failure() from None
+
+
+@router.get(
+    "/assessments",
+    response_model=AssessmentListResponse,
+    tags=["assessments"],
+    dependencies=[Depends(require_permission("records:read"))],
+)
+def list_assessments(
+    request: Request,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+) -> AssessmentListResponse:
+    """List persisted assessment records in stable, bounded pages."""
+
+    store = _local_store(request)
+    try:
+        rows, total = store.list_assessments(offset=offset, limit=limit)
+        items = [AssessmentResponse(**row) for row in rows]
+        return AssessmentListResponse(items=tuple(items), total=total, offset=offset, limit=limit)
+    except (LocalStoreError, ValueError, TypeError):
+        raise _store_failure() from None
+
+
+@router.get(
+    "/assessments/{assessment_id}",
+    response_model=AssessmentResponse,
+    tags=["assessments"],
+    dependencies=[Depends(require_permission("records:read"))],
+)
+def get_assessment(
+    request: Request,
+    assessment_id: Annotated[str, Path(pattern=r"^asm_[0-9a-f]{32}$")],
+) -> AssessmentResponse:
+    """Fetch a single persisted assessment record by its unique identifier."""
+
+    store = _local_store(request)
+    try:
+        row = store.get_assessment(assessment_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Stored assessment was not found.")
+        return AssessmentResponse(**row)
+    except HTTPException:
+        raise
+    except (LocalStoreError, ValueError, TypeError):
+        raise _store_failure() from None
+
+
+@router.post(
+    "/assessments/{assessment_id}/execute",
+    response_model=AssessmentResponse,
+    status_code=200,
+    tags=["assessments"],
+    dependencies=[Depends(require_permission("assessments:execute"))],
+    responses={
+        200: {"description": "Assessment execution completed successfully."},
+        400: {"description": "Assessment is not eligible for execution or target URL is invalid."},
+        401: {"description": "Authentication required or credentials are invalid."},
+        403: {"description": "Authenticated account lacks 'assessments:execute' permission."},
+        404: {"description": "Target assessment was not found."},
+        409: {"description": "Assessment is currently executing or already terminal."},
+        503: {"description": "Authentication or local persistence store is not configured or unavailable."},
+    },
+)
+def execute_assessment(
+    request: Request,
+    assessment_id: Annotated[str, Path(pattern=r"^asm_[0-9a-f]{32}$")],
+    session: Annotated[AuthenticatedSession, Depends(require_session)],
+) -> AssessmentResponse:
+    """Execute a passive HTTP HEAD connectivity observation for a persisted assessment.
+
+    Authentication:
+        Bearer token required (Authorization: Bearer <token>).
+
+    Required Permission:
+        'assessments:execute' (Read-only 'records:read' permission is insufficient).
+
+    Responses:
+        200: Bounded passive observation completed and persisted.
+        400: Target URL violates lab scope or validation rules.
+        401: Unauthenticated request or invalid credentials.
+        403: Authenticated account lacks 'assessments:execute' permission.
+        404: Target assessment ID was not found.
+        409: Assessment is currently executing or has already completed execution.
+        503: Authentication or local persistence store is not configured or unavailable.
+    """
+
+    store = _writable_local_store(request)
+    lease_token: str | None = None
+    try:
+        assessment = store.get_assessment(assessment_id)
+        if assessment is None:
+            raise HTTPException(status_code=404, detail="Target assessment was not found.")
+
+        executor = getattr(request.app.state, "assessment_executor", None)
+        if executor is None:
+            raise HTTPException(status_code=503, detail="Authorized target configuration is unavailable.")
+        try:
+            executor.validate_binding(assessment)
+        except TargetAuthorizationError:
+            raise HTTPException(status_code=409, detail="Assessment target authorization is missing or no longer valid.") from None
+        except AuthorizationVerificationError as exc:
+            raise _authorization_failure(exc) from None
+
+        try:
+            running_record = store.update_assessment_status(
+                assessment_id=assessment_id,
+                new_status="running",
+                lease_duration_seconds=DEFAULT_EXECUTION_LEASE_SECONDS,
+            )
+            lease_token = running_record.get("lease_token")
+        except LocalStoreConflictError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="Assessment is currently executing or has already completed.",
+            ) from exc
+
+        # The API has no direct HTTP-engine access. The production executor revalidates
+        # the persisted binding, obtains a one-use policy permit, then dispatches via
+        # GuardedExecutionBoundary to the peer-checking loopback transport.
+        execution_assessment = store.get_assessment(assessment_id)
+        if execution_assessment is None:
+            raise HTTPException(status_code=404, detail="Target assessment was not found.")
+        result = executor.execute(execution_assessment)
+        target_url = execution_assessment["target_url"]
+
+        # Normalize evidence and run passive rule detector engine
+        raw_hash = hashlib.sha256(f"{assessment_id}\0{result.get('executed_at')}".encode("utf-8")).hexdigest()[:32]
+        collection_status = "observed" if result["reachable"] else ("unreachable" if "unreachable" in result["outcome"].lower() else "failed")
+        evidence_record = {
+            "evidence_id": f"evi_{raw_hash}",
+            "assessment_id": assessment_id,
+            "evidence_type": "http_security_headers",
+            "source": "passive_head_observation",
+            "observed_at": result.get("executed_at", datetime.now(timezone.utc).isoformat()),
+            "http_method": "HEAD",
+            "http_status": result.get("http_status"),
+            "normalized_headers": result.get("captured_headers", {}),
+            "header_flags": result.get("header_flags", {}),
+            "collection_status": collection_status,
+            "provenance": {
+                "duration_ms": result.get("duration_ms"),
+                "redirect_detected": result.get("redirect_detected", False),
+                "outcome": result.get("outcome"),
+            },
+        }
+
+        findings = PassiveHeaderDetector.analyze(assessment_id, target_url, evidence_record)
+        reviewer = getattr(request.app.state, "assessment_ai_reviewer", None)
+        if reviewer is None:
+            if getattr(request.app.state, "assessment_ai_configuration_invalid", False):
+                ai_review = {
+                    "status": "unavailable",
+                    "analysis_type": "advisory_inference",
+                    "confidence_calibrated": False,
+                    "factual_support": "not_evaluated",
+                    "failure_code": "invalid_configuration",
+                    "reviews": [],
+                }
+            else:
+                ai_review = {
+                    "status": "disabled",
+                    "analysis_type": "advisory_inference",
+                    "confidence_calibrated": False,
+                    "factual_support": "not_evaluated",
+                    "reviews": [],
+                }
+        else:
+            try:
+                ai_review = reviewer.review_safely(evidence_record, findings)
+            except Exception:
+                # An unexpected AI integration fault cannot alter deterministic findings
+                # or the assessment's network-derived terminal status.
+                ai_review = {
+                    "status": "unavailable",
+                    "analysis_type": "advisory_inference",
+                    "confidence_calibrated": False,
+                    "factual_support": "not_evaluated",
+                    "failure_code": "analysis_unavailable",
+                    "reviews": [],
+                }
+        result["ai_review"] = ai_review
+        final_status = "completed" if result["reachable"] else "failed"
+
+        # Atomically save evidence, findings, and status transition in a single SQLite transaction with lease validation
+        final_record = store.save_pipeline_result(
+            assessment_id=assessment_id,
+            evidence=evidence_record,
+            findings=findings,
+            final_status=final_status,
+            execution_result=result,
+            lease_token=lease_token,
+        )
+        return AssessmentResponse(**final_record)
+
+    except HTTPException:
+        raise
+    except LocalStoreError:
+        raise _store_failure() from None
+    except AuthorizationVerificationError as exc:
+        if lease_token:
+            try:
+                store.update_assessment_status(
+                    assessment_id=assessment_id,
+                    new_status="failed",
+                    execution_result={
+                        "reachable": False,
+                        "outcome": "Authorization verification failed before network execution",
+                    },
+                    lease_token=lease_token,
+                )
+            except LocalStoreError:
+                raise _store_failure() from None
+        raise _authorization_failure(exc) from None
+    except Exception:
+        if lease_token:
+            try:
+                store.update_assessment_status(
+                    assessment_id=assessment_id,
+                    new_status="failed",
+                    execution_result={
+                        "reachable": False,
+                        "outcome": "Execution failed due to an internal execution error",
+                    },
+                    lease_token=lease_token,
+                )
+            except LocalStoreError:
+                pass
+        raise _store_failure() from None
+
+
+@router.get(
+    "/assessments/{assessment_id}/evidence",
+    response_model=AssessmentEvidenceListResponse,
+    tags=["assessments"],
+    dependencies=[Depends(require_permission("records:read"))],
+)
+def get_assessment_evidence(
+    request: Request,
+    assessment_id: Annotated[str, Path(pattern=r"^asm_[0-9a-f]{32}$")],
+) -> AssessmentEvidenceListResponse:
+    """List normalized evidence records collected during assessment execution."""
+
+    store = _local_store(request)
+    try:
+        assessment = store.get_assessment(assessment_id)
+        if assessment is None:
+            raise HTTPException(status_code=404, detail="Target assessment was not found.")
+        rows = store.list_evidence(assessment_id)
+        items = [AssessmentEvidenceResponse(**r) for r in rows]
+        return AssessmentEvidenceListResponse(items=tuple(items), total=len(items))
+    except HTTPException:
+        raise
+    except (LocalStoreError, ValueError, TypeError):
+        raise _store_failure() from None
+
+
+@router.get(
+    "/assessments/{assessment_id}/findings",
+    response_model=AssessmentFindingListResponse,
+    tags=["assessments"],
+    dependencies=[Depends(require_permission("records:read"))],
+)
+def get_assessment_findings(
+    request: Request,
+    assessment_id: Annotated[str, Path(pattern=r"^asm_[0-9a-f]{32}$")],
+) -> AssessmentFindingListResponse:
+    """List security configuration observations emitted by rule detectors for an assessment."""
+
+    store = _local_store(request)
+    try:
+        assessment = store.get_assessment(assessment_id)
+        if assessment is None:
+            raise HTTPException(status_code=404, detail="Target assessment was not found.")
+        rows = store.list_findings(assessment_id)
+        items = [AssessmentFindingItemResponse(**r) for r in rows]
+        return AssessmentFindingListResponse(items=tuple(items), total=len(items))
+    except HTTPException:
+        raise
+    except (LocalStoreError, ValueError, TypeError):
+        raise _store_failure() from None

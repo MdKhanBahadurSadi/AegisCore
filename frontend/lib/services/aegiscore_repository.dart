@@ -6,6 +6,7 @@ import 'aegiscore_configuration.dart';
 import 'backend_contract_models.dart';
 import 'backend_errors.dart';
 import 'backend_persisted_models.dart';
+import 'backend_assessment_models.dart';
 import 'lab_scope.dart';
 import 'mock_demo_data.dart';
 
@@ -23,6 +24,16 @@ abstract class AegisCoreRepository {
   Future<BackendOfflineSession?> getOfflineSessionById(String id);
   Future<List<StoredEvaluationReportModel>> getStoredEvaluationReports();
   Future<StoredEvaluationReportModel?> getStoredEvaluationReportById(String id);
+  Future<BackendAssessmentPage> getAssessments({
+    int offset = 0,
+    int limit = 50,
+  });
+  Future<BackendAssessmentRecord?> getAssessmentById(String id);
+  Future<BackendAssessmentRecord> createAssessment(String targetUrl);
+  Future<BackendAssessmentRecord> executeAssessment(String id);
+  Future<List<BackendAssessmentFinding>> getAssessmentFindings(String id);
+  Future<List<BackendAssessmentEvidence>> getAssessmentEvidence(String id);
+  Future<BackendAssessmentDetails?> getAssessmentDetails(String id);
   Future<List<FindingModel>> getFindings();
   Future<FindingModel?> getFindingById(String id);
   Future<List<EvidenceModel>> getEvidenceList();
@@ -108,6 +119,61 @@ class DemoAegisCoreRepository implements AegisCoreRepository {
   );
 
   @override
+  Future<BackendAssessmentPage> getAssessments({
+    int offset = 0,
+    int limit = 50,
+  }) => Future.error(
+    UnsupportedBackendCapabilityException('live assessment history'),
+  );
+
+  @override
+  Future<BackendAssessmentRecord?> getAssessmentById(String id) => Future.error(
+    UnsupportedBackendCapabilityException('live assessment retrieval'),
+  );
+
+  @override
+  Future<BackendAssessmentRecord> createAssessment(String targetUrl) =>
+      Future.error(
+        UnsupportedBackendCapabilityException('live assessment creation'),
+      );
+
+  @override
+  Future<BackendAssessmentRecord> executeAssessment(String id) => Future.error(
+    UnsupportedBackendCapabilityException('live assessment execution'),
+  );
+
+  @override
+  Future<List<BackendAssessmentFinding>> getAssessmentFindings(String id) =>
+      Future.error(
+        UnsupportedBackendCapabilityException('assessment findings'),
+      );
+
+  @override
+  Future<List<BackendAssessmentEvidence>> getAssessmentEvidence(String id) =>
+      Future.error(
+        UnsupportedBackendCapabilityException('assessment evidence'),
+      );
+
+  @override
+  Future<BackendAssessmentDetails?> getAssessmentDetails(String id) async {
+    final assessment = await getAssessmentById(id);
+    if (assessment == null) return null;
+    final findings = await _loadAssessmentResource(
+      () => getAssessmentFindings(id),
+    );
+    final evidence = await _loadAssessmentResource(
+      () => getAssessmentEvidence(id),
+    );
+    return BackendAssessmentDetails(
+      assessment: assessment,
+      findings: findings.value,
+      findingsError: findings.error,
+      evidence: evidence.value,
+      evidenceError: evidence.error,
+    );
+  }
+
+  @override
   Future<List<FindingModel>> getFindings() async {
     await Future.delayed(const Duration(milliseconds: 200));
     return MockDemoData.findings;
@@ -160,5 +226,15 @@ class DemoAegisCoreRepository implements AegisCoreRepository {
       );
     }
     return 'SESSION-${DateTime.now().millisecondsSinceEpoch}';
+  }
+}
+
+Future<({List<T>? value, String? error})> _loadAssessmentResource<T>(
+  Future<List<T>> Function() load,
+) async {
+  try {
+    return (value: await load(), error: null);
+  } catch (error) {
+    return (value: null, error: assessmentResourceError(error));
   }
 }

@@ -188,7 +188,12 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Failed to Load Data'), findsOneWidget);
-    expect(find.text('The backend request failed (HTTP 503).'), findsOneWidget);
+    expect(
+      find.text(
+        'The backend authorization or persistence service is currently unavailable.',
+      ),
+      findsOneWidget,
+    );
     expect(find.textContaining('private path'), findsNothing);
   });
 
@@ -380,7 +385,12 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('Failed to Load Data'), findsOneWidget);
-    expect(find.text('The backend request failed (HTTP 503).'), findsOneWidget);
+    expect(
+      find.text(
+        'The backend authorization or persistence service is currently unavailable.',
+      ),
+      findsOneWidget,
+    );
     expect(find.textContaining('private diagnostic'), findsNothing);
     expect(requestCount, greaterThan(1));
 
@@ -455,7 +465,7 @@ void main() {
   });
 
   testWidgets(
-    'live assessment setup disables submission without a backend contract',
+    'live assessment setup exposes the supported passive create contract',
     (tester) async {
       tester.view.physicalSize = const Size(1280, 900);
       tester.view.devicePixelRatio = 1;
@@ -471,7 +481,12 @@ void main() {
               ),
             ),
             backendHttpClientProvider.overrideWithValue(
-              MockClient((_) async => http.Response('', 404)),
+              MockClient(
+                (_) async => http.Response(
+                  '{"items":[],"total":0,"offset":0,"limit":50}',
+                  200,
+                ),
+              ),
             ),
           ],
           child: const MaterialApp(home: AssessmentSetupScreen()),
@@ -479,13 +494,12 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      expect(find.text('Create Assessment'), findsOneWidget);
+      expect(find.text('Persisted assessments'), findsOneWidget);
       expect(
-        find.textContaining(
-          'has no authorized offline assessment execution endpoint',
-        ),
+        find.textContaining('This screen cannot grant authorization.'),
         findsOneWidget,
       );
-      expect(find.text('Submission Unavailable'), findsOneWidget);
     },
   );
 

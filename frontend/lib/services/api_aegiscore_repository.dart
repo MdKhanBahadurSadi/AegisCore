@@ -12,11 +12,14 @@ import 'aegiscore_repository.dart';
 import 'backend_contract_models.dart';
 import 'backend_errors.dart';
 import 'backend_persisted_models.dart';
+import 'backend_assessment_models.dart';
 import 'lab_scope.dart';
 
-/// Live repository for the read-only FastAPI contracts that currently exist.
-/// It deliberately does not synthesize assessment, finding, or report data when
-/// those API contracts are absent.
+const int _maxAssessmentApiResponseBytes = 2 * 1024 * 1024;
+
+/// Live repository for the authenticated FastAPI contracts that currently exist.
+/// Assessment operations use the server's authorization and lifecycle contracts;
+/// the client does not create approval references or execution policy.
 class ApiAegisCoreRepository implements AegisCoreRepository {
   final AegisCoreConfiguration configuration;
   final http.Client _client;
@@ -37,7 +40,7 @@ class ApiAegisCoreRepository implements AegisCoreRepository {
   String get displayEndpoint => configuration.displayEndpoint;
 
   @override
-  bool get supportsAssessmentSubmission => false;
+  bool get supportsAssessmentSubmission => true;
 
   @override
   Future<bool> checkBackendHealth() async {
@@ -119,6 +122,117 @@ class ApiAegisCoreRepository implements AegisCoreRepository {
       if (error.statusCode == 404) return null;
       rethrow;
     }
+  }
+
+  @override
+  Future<BackendAssessmentPage> getAssessments({
+    int offset = 0,
+    int limit = 50,
+  }) {
+    if (offset < 0 || limit < 1 || limit > 100) {
+      throw ArgumentError('Assessment page bounds are invalid.');
+    }
+    return _getJson(
+      'assessments?offset=$offset&limit=$limit',
+      BackendAssessmentPage.fromJson,
+    );
+  }
+
+  @override
+  Future<BackendAssessmentRecord?> getAssessmentById(String id) async {
+    try {
+      return await _getJson(
+        'assessments/${Uri.encodeComponent(id)}',
+        BackendAssessmentRecord.fromJson,
+      );
+    } on BackendHttpException catch (error) {
+      if (error.statusCode == 404) return null;
+      rethrow;
+    }
+  }
+
+  @override
+  Future<BackendAssessmentRecord> createAssessment(String targetUrl) =>
+      _postJson(
+        'assessments',
+        BackendAssessmentRecord.fromJson,
+        body: {'target_url': targetUrl},
+      );
+
+  @override
+  Future<BackendAssessmentRecord> executeAssessment(String id) => _postJson(
+    'assessments/${Uri.encodeComponent(id)}/execute',
+    BackendAssessmentRecord.fromJson,
+  );
+
+  @override
+  Future<List<BackendAssessmentFinding>> getAssessmentFindings(
+    String id,
+  ) async {
+    final page = await _getJson(
+      'assessments/${Uri.encodeComponent(id)}/findings',
+      (json) => _parseAssessmentList<BackendAssessmentFinding>(
+        json,
+        BackendAssessmentFinding.fromJson,
+        'assessment finding',
+      ),
+    );
+    return page;
+  }
+
+  @override
+  Future<List<BackendAssessmentEvidence>> getAssessmentEvidence(
+    String id,
+  ) async {
+    return _getJson(
+      'assessments/${Uri.encodeComponent(id)}/evidence',
+      (json) => _parseAssessmentList<BackendAssessmentEvidence>(
+        json,
+        BackendAssessmentEvidence.fromJson,
+        'assessment evidence',
+      ),
+    );
+  }
+
+  @override
+  Future<BackendAssessmentDetails?> getAssessmentDetails(String id) async {
+    final assessment = await getAssessmentById(id);
+    if (assessment == null) return null;
+    final findingsFuture = _loadApiAssessmentResource(
+      () => getAssessmentFindings(id),
+    );
+    final evidenceFuture = _loadApiAssessmentResource(
+      () => getAssessmentEvidence(id),
+    );
+    final findings = await findingsFuture;
+    final evidence = await evidenceFuture;
+    var findingsValue = findings.value;
+    var findingsError = findings.error;
+    var evidenceValue = evidence.value;
+    var evidenceError = evidence.error;
+    if (findingsValue?.any(
+          (item) => item.assessmentId != assessment.assessmentId,
+        ) ==
+        true) {
+      findingsValue = null;
+      findingsError =
+          'The backend returned findings for a different assessment.';
+    }
+    if (evidenceValue?.any(
+          (item) => item.assessmentId != assessment.assessmentId,
+        ) ==
+        true) {
+      evidenceValue = null;
+      evidenceError =
+          'The backend returned evidence for a different assessment.';
+    }
+    return BackendAssessmentDetails(
+      assessment: assessment,
+      findings: findingsValue,
+      findingsError: findingsError,
+      evidence: evidenceValue,
+      evidenceError: evidenceError,
+    );
   }
 
   @override
@@ -214,10 +328,28 @@ class ApiAegisCoreRepository implements AegisCoreRepository {
   Future<T> _unsupported<T>(String capability) =>
       Future<T>.error(UnsupportedBackendCapabilityException(capability));
 
-  Future<T> _getJson<T>(String path, T Function(Object? json) parse) async {
-    final request = http.Request('GET', configuration.endpoint(path));
+  Future<T> _getJson<T>(String path, T Function(Object? json) parse) =>
+      _requestJson('GET', path, parse);
+
+  Future<T> _postJson<T>(
+    String path,
+    T Function(Object? json) parse, {
+    Object? body,
+  }) => _requestJson('POST', path, parse, body: body);
+
+  Future<T> _requestJson<T>(
+    String method,
+    String path,
+    T Function(Object? json) parse, {
+    Object? body,
+  }) async {
+    final request = http.Request(method, configuration.endpoint(path));
     if (accessToken != null) {
       request.headers['Authorization'] = 'Bearer $accessToken';
+    }
+    if (body != null) {
+      request.headers['Content-Type'] = 'application/json';
+      request.body = jsonEncode(body);
     }
     late final http.StreamedResponse streamed;
     try {
@@ -239,6 +371,10 @@ class ApiAegisCoreRepository implements AegisCoreRepository {
 
     late final http.Response response;
     try {
+      if (streamed.contentLength != null &&
+          streamed.contentLength! > _maxAssessmentApiResponseBytes) {
+        throw const BackendResponseException();
+      }
       response = await http.Response.fromStream(streamed).timeout(
         configuration.requestTimeout,
         onTimeout: () => throw const BackendTimeoutException('request'),
@@ -254,14 +390,18 @@ class ApiAegisCoreRepository implements AegisCoreRepository {
     }
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      if (response.statusCode == 401 && accessToken != null) {
-        onAuthenticationExpired?.call(accessToken!);
+      if (response.statusCode == 401) {
+        final token = accessToken;
+        if (token != null) onAuthenticationExpired?.call(token);
         throw const BackendAuthenticationException();
       }
       if (response.statusCode == 403) {
         throw const BackendAuthorizationException();
       }
       throw BackendHttpException(response.statusCode);
+    }
+    if (response.bodyBytes.length > _maxAssessmentApiResponseBytes) {
+      throw const BackendResponseException();
     }
     try {
       return parse(jsonDecode(response.body));
@@ -270,6 +410,24 @@ class ApiAegisCoreRepository implements AegisCoreRepository {
     } catch (_) {
       throw const BackendResponseException();
     }
+  }
+
+  static List<T> _parseAssessmentList<T>(
+    Object? value,
+    T Function(Object? value) parseItem,
+    String label,
+  ) {
+    if (value is! Map<String, dynamic> ||
+        value.length != 2 ||
+        !value.keys.toSet().containsAll(const {'items', 'total'})) {
+      throw FormatException('Unexpected $label list response.');
+    }
+    final items = value['items'];
+    final total = value['total'];
+    if (items is! List || total is! int || total < 0 || items.length != total) {
+      throw FormatException('Unexpected $label list response.');
+    }
+    return List<T>.unmodifiable(items.map(parseItem));
   }
 
   static _EvidencePage _parseEvidencePage(Object? json) {
@@ -495,4 +653,14 @@ class _FindingPage {
     required this.total,
     required this.offset,
   });
+}
+
+Future<({List<T>? value, String? error})> _loadApiAssessmentResource<T>(
+  Future<List<T>> Function() load,
+) async {
+  try {
+    return (value: await load(), error: null);
+  } catch (error) {
+    return (value: null, error: assessmentResourceError(error));
+  }
 }

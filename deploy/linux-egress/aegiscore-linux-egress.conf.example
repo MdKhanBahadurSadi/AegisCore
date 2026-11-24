@@ -1,0 +1,14 @@
+# Copy to /etc/aegiscore/linux-egress.conf and set paths for the deployed checkout.
+# Blank TARGETS_FILE means no execution target ports are permitted.
+AEGISCORE_NAMESPACE=aegiscore
+AEGISCORE_API_PORT=8000
+AEGISCORE_TARGETS_FILE=
+# Optional local UI/client destination ports; empty means none.
+AEGISCORE_LOCAL_CLIENT_PORTS=
+AEGISCORE_RUN_USER=aegiscore
+AEGISCORE_RUN_GROUP=aegiscore
+AEGISCORE_APP_ROOT=/opt/aegiscore
+AEGISCORE_PYTHON=/opt/aegiscore/.venv/bin/python
+AEGISCORE_STORE_PATH=/var/lib/aegiscore/records.sqlite3
+# Optional private AuthSettings TOML path, owned by aegiscore and mode 0600.
+AEGISCORE_AUTH_CONFIG_FILE=

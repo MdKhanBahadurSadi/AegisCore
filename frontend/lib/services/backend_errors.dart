@@ -49,6 +49,19 @@ class UnsupportedBackendCapabilityException extends BackendException {
 }
 
 String userFacingBackendError(Object error) {
+  if (error is BackendHttpException) {
+    return switch (error.statusCode) {
+      400 || 422 =>
+        'The backend rejected the target or request. Confirm the endpoint is registered and authorized.',
+      404 => 'The requested assessment was not found.',
+      409 =>
+        'The assessment is running or has already reached a terminal state.',
+      503 =>
+        'The backend authorization or persistence service is currently unavailable.',
+      >= 500 => 'The backend could not complete this request. Try again later.',
+      _ => error.message,
+    };
+  }
   if (error is BackendException) return error.message;
   return 'Could not load data. Please try again.';
 }

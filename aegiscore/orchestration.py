@@ -96,7 +96,15 @@ def _validate_lab_target_url(url: str) -> None:
     if url != url.strip():
         raise ScopeViolationError("target_url contains un-trimmed leading/trailing whitespace")
 
-    parsed = urlsplit(url)
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError as exc:
+        raise ScopeViolationError(f"target_url has an invalid port or syntax: {exc}") from exc
+
+    if port is not None and not (1 <= port <= 65535):
+        raise ScopeViolationError(f"target_url port '{port}' is out of valid range (1-65535)")
+
     if parsed.scheme.lower() not in _ALLOWED_SCHEMES:
         raise ScopeViolationError(f"target_url scheme '{parsed.scheme}' is not permitted; must be http or https")
     if parsed.username or parsed.password:
@@ -104,7 +112,11 @@ def _validate_lab_target_url(url: str) -> None:
     if parsed.fragment:
         raise ScopeViolationError("target_url must not contain URL fragments")
 
-    hostname = parsed.hostname
+    try:
+        hostname = parsed.hostname
+    except ValueError as exc:
+        raise ScopeViolationError(f"target_url hostname is malformed: {exc}") from exc
+
     if not hostname:
         raise ScopeViolationError("target_url must contain a valid hostname or IP address")
 

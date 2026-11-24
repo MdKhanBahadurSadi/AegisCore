@@ -4,6 +4,7 @@ class RouteConstants {
 
   static const String dashboard = '/';
   static const String assessmentSetup = '/assessment-setup';
+  static const String assessmentDetails = '/assessments/:id';
   static const String findings = '/findings';
   static const String findingDetails = '/findings/:id';
   static const String sessionDetails = '/sessions/:id';
@@ -13,4 +14,6 @@ class RouteConstants {
 
   static String findingDetailsPath(String findingId) => '/findings/$findingId';
   static String sessionDetailsPath(String sessionId) => '/sessions/$sessionId';
+  static String assessmentDetailsPath(String assessmentId) =>
+      '/assessments/$assessmentId';
 }

@@ -54,13 +54,17 @@ void main() {
     );
 
     test('validateLabScope enforces strict local container ports', () async {
-      // Allowed local container targets
+      // Allowed canonical numeric loopback container targets
       expect(
-        await repository.validateLabScope('http://localhost:3000'),
+        await repository.validateLabScope('http://127.0.0.1:3000'),
         isTrue,
       );
       expect(
-        await repository.validateLabScope('http://localhost:8080'),
+        await repository.validateLabScope('http://localhost:3000'),
+        isFalse,
+      );
+      expect(
+        await repository.validateLabScope('http://127.0.0.1:8080'),
         isTrue,
       );
       expect(
@@ -81,8 +85,7 @@ void main() {
     test('submitAssessmentSetup throws when confirmation is false', () async {
       const unconfirmed = AssessmentSetupConfig(
         labTargetId: 'juice_shop_local',
-        targetUrl: 'http://localhost:3000',
-        selectedSpecialists: ['sql_injection_analyst'],
+        targetUrl: 'http://127.0.0.1:3000',
         isAuthorizedLabConfirmed: false,
       );
 
@@ -97,8 +100,7 @@ void main() {
       () async {
         const confirmed = AssessmentSetupConfig(
           labTargetId: 'juice_shop_local',
-          targetUrl: 'http://localhost:3000',
-          selectedSpecialists: ['sql_injection_analyst'],
+          targetUrl: 'http://127.0.0.1:3000',
           isAuthorizedLabConfirmed: true,
         );
 
@@ -115,31 +117,8 @@ void main() {
 
       final state = container.read(assessmentSetupProvider);
       expect(state.labTargetId, equals('juice_shop_local'));
-      expect(state.targetUrl, equals('http://localhost:3000'));
-      expect(state.adversarialReviewerEnabled, isTrue);
-      expect(state.strictEvidenceGrounding, isTrue);
+      expect(state.targetUrl, equals('http://127.0.0.1:3000'));
       expect(state.isAuthorizedLabConfirmed, isFalse);
-      expect(state.selectedSpecialists, contains('sql_injection_analyst'));
-    });
-
-    test('toggling specialists updates list and respects minimum', () {
-      final container = ProviderContainer();
-      addTearDown(container.dispose);
-
-      final notifier = container.read(assessmentSetupProvider.notifier);
-
-      notifier.toggleSpecialist('filesystem_specialist');
-      expect(
-        container.read(assessmentSetupProvider).selectedSpecialists,
-        contains('filesystem_specialist'),
-      );
-
-      // Remove it again
-      notifier.toggleSpecialist('filesystem_specialist');
-      expect(
-        container.read(assessmentSetupProvider).selectedSpecialists,
-        isNot(contains('filesystem_specialist')),
-      );
     });
 
     test('updating lab target resets confirmation flag', () {
@@ -153,10 +132,10 @@ void main() {
         isTrue,
       );
 
-      notifier.updateLabTarget('dvwa_local', 'http://localhost:8080');
+      notifier.updateLabTarget('dvwa_local', 'http://127.0.0.1:8080');
       final updated = container.read(assessmentSetupProvider);
       expect(updated.labTargetId, equals('dvwa_local'));
-      expect(updated.targetUrl, equals('http://localhost:8080'));
+      expect(updated.targetUrl, equals('http://127.0.0.1:8080'));
       expect(updated.isAuthorizedLabConfirmed, isFalse);
     });
   });

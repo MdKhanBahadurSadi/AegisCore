@@ -22,6 +22,14 @@ htmlcov/
 .secrets/
 *.secret
 
+# Windows/File explorer copy artifacts
+* - Copy/
+* - Copy (*/
+
+# Local scratch and temporary test directories
+scratch/
+tmp/
+
 # Generated local application data
 .local-data/
 *.db

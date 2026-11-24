@@ -4,6 +4,7 @@ import '../constants/route_constants.dart';
 import 'authenticated_shell.dart';
 import '../../features/dashboard/screens/dashboard_screen.dart';
 import '../../features/assessment_setup/screens/assessment_setup_screen.dart';
+import '../../features/assessment_setup/screens/assessment_details_screen.dart';
 import '../../features/findings/screens/findings_screen.dart';
 import '../../features/findings/screens/finding_details_screen.dart';
 import '../../features/sessions/screens/session_details_screen.dart';
@@ -36,6 +37,12 @@ final GoRouter appRouter = GoRouter(
         GoRoute(
           path: RouteConstants.assessmentSetup,
           builder: (context, state) => const AssessmentSetupScreen(),
+        ),
+        GoRoute(
+          path: RouteConstants.assessmentDetails,
+          builder: (context, state) => AssessmentDetailsScreen(
+            assessmentId: state.pathParameters['id'] ?? '',
+          ),
         ),
         GoRoute(
           path: RouteConstants.findings,

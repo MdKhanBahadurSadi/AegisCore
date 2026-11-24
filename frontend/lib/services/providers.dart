@@ -10,6 +10,7 @@ import 'backend_http_client.dart';
 import 'api_aegiscore_repository.dart';
 import 'backend_contract_models.dart';
 import 'backend_persisted_models.dart';
+import 'backend_assessment_models.dart';
 
 export 'backend_http_client.dart'
     show aegisCoreConfigurationProvider, backendHttpClientProvider;
@@ -25,9 +26,8 @@ final aegisCoreRepositoryProvider = Provider<AegisCoreRepository>((ref) {
       accessToken: auth.accessToken,
       onAuthenticationExpired: auth.accessToken == null
           ? null
-          : (token) => ref
-                .read(authenticationProvider.notifier)
-                .expireSession(token),
+          : (token) =>
+                ref.read(authenticationProvider.notifier).expireSession(token),
     );
   }
   return DemoAegisCoreRepository();
@@ -130,20 +130,26 @@ final storedEvaluationReportDetailsProvider =
       return repo.getStoredEvaluationReportById(id);
     });
 
+/// The first bounded page of persisted passive assessments.
+final backendAssessmentsProvider = FutureProvider<BackendAssessmentPage>((ref) {
+  final repo = ref.watch(aegisCoreRepositoryProvider);
+  return repo.getAssessments(offset: 0, limit: 50);
+});
+
+/// Assessment record plus independently loaded findings and evidence.
+final backendAssessmentDetailsProvider =
+    FutureProvider.family<BackendAssessmentDetails?, String>((ref, id) async {
+      final repo = ref.watch(aegisCoreRepositoryProvider);
+      return repo.getAssessmentDetails(id);
+    });
+
 /// Assessment setup configuration controller.
 class AssessmentSetupNotifier extends Notifier<AssessmentSetupConfig> {
   @override
   AssessmentSetupConfig build() {
     return const AssessmentSetupConfig(
       labTargetId: 'juice_shop_local',
-      targetUrl: 'http://localhost:3000',
-      selectedSpecialists: [
-        'sql_injection_analyst',
-        'xss_specialist',
-        'deserialization_specialist',
-      ],
-      adversarialReviewerEnabled: true,
-      strictEvidenceGrounding: true,
+      targetUrl: 'http://127.0.0.1:3000',
       isAuthorizedLabConfirmed: false,
     );
   }
@@ -154,26 +160,6 @@ class AssessmentSetupNotifier extends Notifier<AssessmentSetupConfig> {
       targetUrl: targetUrl,
       isAuthorizedLabConfirmed: false,
     );
-  }
-
-  void toggleSpecialist(String specialist) {
-    final list = List<String>.from(state.selectedSpecialists);
-    if (list.contains(specialist)) {
-      if (list.length > 1) {
-        list.remove(specialist);
-      }
-    } else {
-      list.add(specialist);
-    }
-    state = state.copyWith(selectedSpecialists: list);
-  }
-
-  void setAdversarialReviewer(bool enabled) {
-    state = state.copyWith(adversarialReviewerEnabled: enabled);
-  }
-
-  void setStrictEvidenceGrounding(bool enabled) {
-    state = state.copyWith(strictEvidenceGrounding: enabled);
   }
 
   void setAuthorizedLabConfirmed(bool confirmed) {

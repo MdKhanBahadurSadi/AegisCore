@@ -1,0 +1,37 @@
+# REFERENCE TEMPLATE ONLY. This file is intentionally not sourceable as-is.
+# Replace placeholders through the deployment's approved secret/configuration
+# process. Do not place passwords, signing keys, approval records, or tokens here.
+# No production authorization verifier is implemented by this repository.
+
+# Backend process configuration (AEGISCORE_API_HOST / PORT default to these).
+AEGISCORE_API_HOST=127.0.0.1
+AEGISCORE_API_PORT=<LOCAL_API_TCP_PORT>
+AEGISCORE_LOCAL_STORE_PATH=<ABSOLUTE_PERSISTENT_SQLITE_PATH>
+AEGISCORE_AUTHORIZED_TARGETS_FILE=<ABSOLUTE_PROTECTED_TARGET_REGISTRY_PATH>
+AEGISCORE_CORS_ALLOWED_ORIGINS=<EXACT_BROWSER_ORIGIN_OR_LEAVE_UNSET_FOR_SAME_ORIGIN>
+
+# Configure authentication by exactly one supported mechanism:
+# A) environment values provisioned by the operator's secret manager:
+AEGISCORE_AUTH_USERNAME=<OPERATOR_PROVISIONED_USERNAME>
+AEGISCORE_AUTH_PASSWORD_HASH=<ARGON2ID_HASH_PROVISIONED_OUT_OF_BAND>
+# Optional: 1 through 86400; default 1800.
+AEGISCORE_AUTH_SESSION_TTL_SECONDS=<SESSION_TTL_SECONDS>
+# Optional comma-separated subset of records:read,evidence:read,
+# assessments:create,assessments:execute. Default is all four permissions.
+AEGISCORE_AUTH_PERMISSIONS=<EXPLICIT_PERMISSION_SET>
+
+# Or use a private TOML file instead of the authentication values above:
+# AEGISCORE_AUTH_CONFIG_FILE=<ABSOLUTE_PRIVATE_AUTH_TOML_PATH>
+# Do not configure both mechanisms. POSIX auth TOML must be owner-only (0600).
+
+# Flutter web/mobile API base URL is a compile-time setting, not a backend
+# environment variable. Supply it as --dart-define=AEGIS_API_BASE_URL=<LOOPBACK_API_URL>.
+# For browser use, set the backend CORS allowlist to the exact browser origin.
+
+# Linux isolation wrapper configuration is separate and lives in
+# deploy/linux-egress/aegiscore-linux-egress.conf.example. Its AEGISCORE_TARGETS_FILE
+# maps to AEGISCORE_AUTHORIZED_TARGETS_FILE in the backend child process, and its
+# AEGISCORE_STORE_PATH maps to AEGISCORE_LOCAL_STORE_PATH. Do not duplicate or
+# silently source this reference file from the wrapper.
+
+# Do not add a made-up verifier, issuer, trusted key, approval record, or signing key.

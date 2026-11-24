@@ -13,7 +13,7 @@ class AppConstants {
       id: 'juice_shop_local',
       name: 'OWASP Juice Shop',
       version: 'v17.1.1',
-      defaultUrl: 'http://localhost:3000',
+      defaultUrl: 'http://127.0.0.1:3000',
       description:
           'OWASP Juice Shop official containerized lab. Target ports: 3000.',
       status: 'Active Lab',
@@ -22,7 +22,7 @@ class AppConstants {
       id: 'dvwa_local',
       name: 'Damn Vulnerable Web App (DVWA)',
       version: 'v1.10',
-      defaultUrl: 'http://localhost:8080',
+      defaultUrl: 'http://127.0.0.1:8080',
       description:
           'DVWA PHP/MySQL vulnerable application container. Target ports: 8080.',
       status: 'Active Lab',

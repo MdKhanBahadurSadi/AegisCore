@@ -20,10 +20,9 @@ void main() {
 
       // Verify title and safety notice
       expect(find.text('Assessment Configuration'), findsOneWidget);
-      expect(
-        find.textContaining('STRICT AUTHORIZED LAB SCOPE'),
-        findsOneWidget,
-      );
+      expect(find.textContaining('PASSIVE ASSESSMENT SAFETY'), findsOneWidget);
+      expect(find.text('Enable Adversarial Evidence Reviewer'), findsNothing);
+      expect(find.text('2. Multi-Specialist Roles'), findsNothing);
 
       // Authorized lab targets should be listed
       expect(find.textContaining('OWASP Juice Shop'), findsAtLeast(1));

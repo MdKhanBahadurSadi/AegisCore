@@ -37,6 +37,8 @@ def test_capabilities_endpoint_reports_only_implemented_and_unimplemented_featur
             "api.approved_evidence_endpoints",
             "api.persisted_workflow_read_endpoints",
             "api.dashboard_summary_endpoint",
+            "api.assessment_creation_endpoint",
+            "api.assessment_execution_endpoint",
             "api.local_authentication",
             "api.read_permission_authorization",
             "api.loopback_access_boundary",
